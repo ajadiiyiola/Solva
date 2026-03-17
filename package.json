@@ -3,6 +3,6 @@
   "version": "1.0.0",
   "description": "Solva — STEM Homework Solver",
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   }
 }
