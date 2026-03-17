@@ -994,7 +994,7 @@ Extract the equation or problem from the image, solve it step by step, and retur
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-sonnet-4-5',
+        model: 'claude-3-5-sonnet-20241022',
         max_tokens: 1000,
         messages: [{
           role: 'user',
@@ -1007,6 +1007,8 @@ Extract the equation or problem from the image, solve it step by step, and retur
     });
 
     const data = await response.json();
+    // Surface API errors clearly
+    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
     const text = data.content?.find(b => b.type === 'text')?.text || '';
 
     let parsed;
