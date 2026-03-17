@@ -1,0 +1,8 @@
+{
+  "name": "solva",
+  "version": "1.0.0",
+  "description": "Solva — STEM Homework Solver",
+  "engines": {
+    "node": "18.x"
+  }
+}
