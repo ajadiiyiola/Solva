@@ -829,24 +829,20 @@ function findRoots(lhs, rhs, v, fullExpr) {
       return math.evaluate(lhs, scope) - math.evaluate(rhs, scope);
     };
 
-    // Scan for sign changes in a reasonable range
-    const ranges = [];
+    // Use larger step size to avoid finding duplicate roots
     const pts = [];
-    for (let x = -200; x <= 200; x += 0.5) pts.push(x);
+    for (let x = -100; x <= 100; x += 2) pts.push(x);
     for (let i = 0; i < pts.length - 1; i++) {
       try {
         const fa = f(pts[i]), fb = f(pts[i+1]);
-        if (isFinite(fa) && isFinite(fb) && fa * fb <= 0) {
-          ranges.push([pts[i], pts[i+1]]);
+        if (isFinite(fa) && isFinite(fb) && fa * fb < 0) {
+          const root = bisect(f, pts[i], pts[i+1]);
+          // Deduplicate with tolerance of 0.1
+          if (root !== null && !roots.some(r => Math.abs(r - root) < 0.1)) {
+            roots.push(Math.round(root * 1e9) / 1e9);
+          }
         }
       } catch {}
-    }
-
-    for (const [lo, hi] of ranges) {
-      const root = bisect(f, lo, hi);
-      if (root !== null && !roots.some(r => Math.abs(r - root) < 0.001)) {
-        roots.push(root);
-      }
     }
   } catch {}
   return roots;
