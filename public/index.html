@@ -618,8 +618,8 @@ function kbInsert(val) {
   const el = getEqEl(); if (!el) return; el.focus();
   let insert = val;
   if (val === '(-)') insert = '-';
-  else if (val === 'd/dx') insert = 'derivative(';
-  else if (val === '∫') insert = 'integrate(';
+  else if (val === 'd/dx') insert = 'derivative(x^2, x)';
+  else if (val === '∫') insert = 'integrate(x^2, x)';
   else if (val === 'lim') insert = 'lim(';
   else if (val === 'Σ') insert = 'sum(1,n,';
   else if (val.includes('=') && val.length > 2) insert = val.split('=')[1];
@@ -713,12 +713,69 @@ function solveExpression(raw) {
     .replace(/−/g,'-')
     .replace(/ΔH|dH/g,'dH').replace(/ΔG|dG/g,'dG').replace(/ΔS|dS/g,'dS');
 
-  // Apply degree conversion for trig if DEG mode
-  if (angleMode === 'deg') {
-    expr = expr.replace(/\b(sin|cos|tan)\(([^)]+)\)/g, (_, fn, arg) => `${fn}((${arg}) * pi / 180)`);
-  }
+  // Auto-add brackets for functions missing them: sin x → sin(x), log x → log(x)
+  expr = expr.replace(/\b(sin|cos|tan|log|ln|sqrt|exp|abs)\s+([a-zA-Z0-9_]+)/g, '$1($2)');
 
   let result;
+
+  // ── DERIVATIVE ──
+  if (/^(derivative|diff|d\/dx)\s*\(/i.test(expr) || expr.startsWith('derivative(')) {
+    try {
+      // Support: derivative(expr, var) or derivative(expr) defaulting to x
+      const inner = expr.replace(/^(derivative|diff|d\/dx)\s*\(/i, '').replace(/\)$/, '');
+      const parts = inner.split(',').map(s => s.trim());
+      const exprPart = parts[0];
+      const varPart = parts[1] || 'x';
+      steps.push({ n:1, t:`Finding derivative of ${exprPart} with respect to ${varPart}` });
+      const node = math.parse(exprPart);
+      const derivative = math.derivative(node, varPart);
+      result = derivative.toString();
+      steps.push({ n:2, t:`Applied differentiation rules` });
+      steps.push({ n:3, t:`d/d${varPart}(${exprPart}) = ${result}` });
+      return { result, steps, unit };
+    } catch(e) {
+      throw new Error('Could not differentiate — check the expression');
+    }
+  }
+
+  // ── INTEGRATION (symbolic via power rule) ──
+  if (/^(integrate|integral|∫)\s*\(/i.test(expr)) {
+    try {
+      const inner = expr.replace(/^(integrate|integral|∫)\s*\(/i, '').replace(/\)$/, '');
+      const parts = inner.split(',').map(s => s.trim());
+      const exprPart = parts[0];
+      const varPart = parts[1] || 'x';
+      // Check if definite integral: integrate(expr, x, a, b)
+      const isDef = parts.length === 4;
+      steps.push({ n:1, t:`${isDef ? 'Definite' : 'Indefinite'} integral of ${exprPart} with respect to ${varPart}` });
+      const integral = symbolicIntegrate(exprPart, varPart);
+      if (isDef) {
+        const a = math.evaluate(parts[2]);
+        const b = math.evaluate(parts[3]);
+        // Numerical definite integral using Simpson's rule
+        const n = 10000;
+        const h = (b - a) / n;
+        let sum = 0;
+        for (let i = 0; i <= n; i++) {
+          const x_i = a + i * h;
+          const scope = { [varPart]: x_i };
+          const fx = math.evaluate(exprPart, scope);
+          sum += (i === 0 || i === n) ? fx : (i % 2 === 0 ? 2 * fx : 4 * fx);
+        }
+        const defResult = formatNum((h / 3) * sum);
+        steps.push({ n:2, t:`Evaluated from ${parts[2]} to ${parts[3]}` });
+        steps.push({ n:3, t:`∫${exprPart} d${varPart} from ${parts[2]} to ${parts[3]} = ${defResult}` });
+        result = defResult;
+      } else {
+        result = integral + ' + C';
+        steps.push({ n:2, t:`Applied integration rules` });
+        steps.push({ n:3, t:`∫${exprPart} d${varPart} = ${result}` });
+      }
+      return { result, steps, unit };
+    } catch(e) {
+      throw new Error('Could not integrate — try: integrate(x^2, x) or integrate(x^2, x, 0, 3)');
+    }
+  }
 
   // Equation with = sign
   if (expr.includes('=') && !expr.match(/^(mean|std|variance|median|sum|max|min|sqrt|log|ln|exp|abs|factorial)\(/)) {
@@ -765,7 +822,10 @@ function solveExpression(raw) {
       steps.push({ n:2, t:'Evaluated right-hand side' });
     }
   } else {
-    // Pure expression
+    // Pure expression — apply degree conversion here only
+    if (angleMode === 'deg') {
+      expr = expr.replace(/\b(sin|cos|tan)\(([^)]+)\)/g, (_, fn, arg) => `${fn}((${arg}) * pi / 180)`);
+    }
     steps.push({ n:1, t:'Parsing expression' });
     let evalExpr = preprocessStats(expr);
     const val = math.evaluate(evalExpr);
@@ -781,6 +841,69 @@ function solveExpression(raw) {
 function subscript(n) {
   const sub = ['₁','₂','₃','₄','₅'];
   return sub[n-1] || n;
+}
+
+// Symbolic integration (handles common cases)
+function symbolicIntegrate(exprStr, v) {
+  try {
+    const node = math.parse(exprStr);
+    return integrateNode(node, v);
+  } catch {
+    throw new Error('Could not integrate symbolically');
+  }
+}
+
+function integrateNode(node, v) {
+  const type = node.type;
+  // Constant
+  if (type === 'ConstantNode') return `${node.value}${v}`;
+  // Variable
+  if (type === 'SymbolNode') {
+    if (node.name === v) return `(${v}^2 / 2)`;
+    return `${node.name}*${v}`;
+  }
+  // Addition / Subtraction
+  if (type === 'OperatorNode' && (node.op === '+' || node.op === '-')) {
+    const left = integrateNode(node.args[0], v);
+    const right = integrateNode(node.args[1], v);
+    return `(${left} ${node.op} ${right})`;
+  }
+  // Power: x^n → x^(n+1)/(n+1)
+  if (type === 'OperatorNode' && node.op === '^') {
+    const base = node.args[0];
+    const exp = node.args[1];
+    if (base.type === 'SymbolNode' && base.name === v && exp.type === 'ConstantNode') {
+      const n = Number(exp.value);
+      if (n === -1) return `ln(|${v}|)`;
+      return `(${v}^${n + 1} / ${n + 1})`;
+    }
+  }
+  // Multiplication by constant: c*x^n
+  if (type === 'OperatorNode' && node.op === '*') {
+    const left = node.args[0];
+    const right = node.args[1];
+    if (left.type === 'ConstantNode') {
+      const inner = integrateNode(right, v);
+      return `${left.value} * ${inner}`;
+    }
+    if (right.type === 'ConstantNode') {
+      const inner = integrateNode(left, v);
+      return `${right.value} * ${inner}`;
+    }
+  }
+  // Common functions
+  if (type === 'FunctionNode') {
+    const arg = node.args[0];
+    const fn = node.name;
+    if (arg.type === 'SymbolNode' && arg.name === v) {
+      if (fn === 'sin') return `(-cos(${v}))`;
+      if (fn === 'cos') return `(sin(${v}))`;
+      if (fn === 'exp') return `(exp(${v}))`;
+      if (fn === 'ln' || fn === 'log') return `(${v}*ln(${v}) - ${v})`;
+    }
+  }
+  // Fallback: numerical representation
+  throw new Error('Expression too complex for symbolic integration');
 }
 
 // Quadratic formula solver — handles complex roots
