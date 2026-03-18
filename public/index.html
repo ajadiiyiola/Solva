@@ -166,14 +166,15 @@ main {
 /* EQ DISPLAY */
 .eq-input-wrap { padding: 12px 14px 0; }
 #eq-display {
-  min-height: 50px; background: var(--surface); border: 1px solid var(--border2);
+  width: 100%; min-height: 54px; height: auto;
+  background: var(--surface); border: 1px solid var(--border2);
   border-radius: 10px; padding: 11px 14px; font-size: 20px; letter-spacing: 1px;
   color: var(--teal); font-family: 'JetBrains Mono', monospace;
-  cursor: text; word-break: break-all; line-height: 1.5;
-  transition: border-color 0.2s; outline: none;
+  resize: none; line-height: 1.5; transition: border-color 0.2s; outline: none;
+  display: block; box-sizing: border-box;
 }
 #eq-display:focus { border-color: var(--teal2); }
-#eq-display:empty::before { content: attr(data-placeholder); color: var(--text3); font-size: 14px; font-weight: 400; }
+#eq-display::placeholder { color: var(--text3); font-size: 14px; font-weight: 400; }
 
 /* DRAW / SNAP area */
 .visual-input-wrap { padding: 12px 14px 0; display: none; flex-direction: column; gap: 10px; }
@@ -354,7 +355,7 @@ const SUBJECTS = {
       Operators: ['+','-','*','/','^','=','(',')'],
       Functions: ['sqrt(','sin(','cos(','tan(','log(','ln(','abs(','floor(','ceil('],
       Constants: ['pi','e','i','Inf'],
-      Calculus:  ['d/dx','∫','lim','Σ'],
+      Calculus:  ['d/dx','∫','d²/dx²','nthRoot('],
     }
   },
   Physics: {
@@ -618,10 +619,10 @@ function kbInsert(val) {
   const el = getEqEl(); if (!el) return; el.focus();
   let insert = val;
   if (val === '(-)') insert = '-';
-  else if (val === 'd/dx') insert = 'derivative(x^2, x)';
-  else if (val === '∫') insert = 'integrate(x^2, x)';
-  else if (val === 'lim') insert = 'lim(';
-  else if (val === 'Σ') insert = 'sum(1,n,';
+  else if (val === 'd/dx') insert = 'derivative(';
+  else if (val === '∫') insert = 'integrate(';
+  else if (val === 'd²/dx²') insert = 'derivative(derivative(';
+  else if (val === 'nthRoot(') insert = 'nthRoot(';
   else if (val.includes('=') && val.length > 2) insert = val.split('=')[1];
 
   const start = el.selectionStart ?? el.value.length;
@@ -648,6 +649,12 @@ function kbClear() {
   const el = getEqEl();
   if (el) { el.value = ''; el.focus(); }
   snapImageBase64 = null;
+  clearCanvas();
+  // Reset snap preview
+  const preview = document.getElementById('snap-preview');
+  const placeholder = document.getElementById('snap-placeholder');
+  if (preview) { preview.src = ''; preview.style.display = 'none'; }
+  if (placeholder) placeholder.style.display = 'flex';
   resetResult();
 }
 
@@ -713,69 +720,16 @@ function solveExpression(raw) {
     .replace(/−/g,'-')
     .replace(/ΔH|dH/g,'dH').replace(/ΔG|dG/g,'dG').replace(/ΔS|dS/g,'dS');
 
-  // Auto-add brackets for functions missing them: sin x → sin(x), log x → log(x)
+  // Auto-add brackets: sin x → sin(x)
   expr = expr.replace(/\b(sin|cos|tan|log|ln|sqrt|exp|abs)\s+([a-zA-Z0-9_]+)/g, '$1($2)');
+  // Implicit multiplication: 4x → 4*x, 2(x+1) → 2*(x+1)
+  expr = expr.replace(/(\d)([a-zA-Z])/g, '$1*$2');
+  expr = expr.replace(/(\d)(\()/g, '$1*(');
+  // log() → log10() so it behaves as base-10 (student expectation)
+  // Only replace plain log( not log10( or log2( or log(x, base)
+  expr = expr.replace(/\blog\s*\(/g, 'log10(');
 
   let result;
-
-  // ── DERIVATIVE ──
-  if (/^(derivative|diff|d\/dx)\s*\(/i.test(expr) || expr.startsWith('derivative(')) {
-    try {
-      // Support: derivative(expr, var) or derivative(expr) defaulting to x
-      const inner = expr.replace(/^(derivative|diff|d\/dx)\s*\(/i, '').replace(/\)$/, '');
-      const parts = inner.split(',').map(s => s.trim());
-      const exprPart = parts[0];
-      const varPart = parts[1] || 'x';
-      steps.push({ n:1, t:`Finding derivative of ${exprPart} with respect to ${varPart}` });
-      const node = math.parse(exprPart);
-      const derivative = math.derivative(node, varPart);
-      result = derivative.toString();
-      steps.push({ n:2, t:`Applied differentiation rules` });
-      steps.push({ n:3, t:`d/d${varPart}(${exprPart}) = ${result}` });
-      return { result, steps, unit };
-    } catch(e) {
-      throw new Error('Could not differentiate — check the expression');
-    }
-  }
-
-  // ── INTEGRATION (symbolic via power rule) ──
-  if (/^(integrate|integral|∫)\s*\(/i.test(expr)) {
-    try {
-      const inner = expr.replace(/^(integrate|integral|∫)\s*\(/i, '').replace(/\)$/, '');
-      const parts = inner.split(',').map(s => s.trim());
-      const exprPart = parts[0];
-      const varPart = parts[1] || 'x';
-      // Check if definite integral: integrate(expr, x, a, b)
-      const isDef = parts.length === 4;
-      steps.push({ n:1, t:`${isDef ? 'Definite' : 'Indefinite'} integral of ${exprPart} with respect to ${varPart}` });
-      const integral = symbolicIntegrate(exprPart, varPart);
-      if (isDef) {
-        const a = math.evaluate(parts[2]);
-        const b = math.evaluate(parts[3]);
-        // Numerical definite integral using Simpson's rule
-        const n = 10000;
-        const h = (b - a) / n;
-        let sum = 0;
-        for (let i = 0; i <= n; i++) {
-          const x_i = a + i * h;
-          const scope = { [varPart]: x_i };
-          const fx = math.evaluate(exprPart, scope);
-          sum += (i === 0 || i === n) ? fx : (i % 2 === 0 ? 2 * fx : 4 * fx);
-        }
-        const defResult = formatNum((h / 3) * sum);
-        steps.push({ n:2, t:`Evaluated from ${parts[2]} to ${parts[3]}` });
-        steps.push({ n:3, t:`∫${exprPart} d${varPart} from ${parts[2]} to ${parts[3]} = ${defResult}` });
-        result = defResult;
-      } else {
-        result = integral + ' + C';
-        steps.push({ n:2, t:`Applied integration rules` });
-        steps.push({ n:3, t:`∫${exprPart} d${varPart} = ${result}` });
-      }
-      return { result, steps, unit };
-    } catch(e) {
-      throw new Error('Could not integrate — try: integrate(x^2, x) or integrate(x^2, x, 0, 3)');
-    }
-  }
 
   // Equation with = sign
   if (expr.includes('=') && !expr.match(/^(mean|std|variance|median|sum|max|min|sqrt|log|ln|exp|abs|factorial)\(/)) {
@@ -784,36 +738,35 @@ function solveExpression(raw) {
     const rhs = expr.slice(eqIdx + 1).trim();
     steps.push({ n:1, t:`Equation: ${lhs} = ${rhs}` });
 
-    // Find single unknown letter (avoid known constants pi, e, i)
+    // Apply DEG conversion in equation branch
+    const _degRx = /\b(sin|cos|tan)\(([^)]+)\)/g;
+    const _degFn = (_, fn, arg) => fn + '((' + arg + ') * pi / 180)';
+    const lhsE = angleMode === 'deg' ? lhs.replace(_degRx, _degFn) : lhs;
+    const rhsE = angleMode === 'deg' ? rhs.replace(_degRx, _degFn) : rhs;
+
+    // Find single unknown letter (avoid known constants)
     const vars = [...new Set((raw.match(/\b([a-z])\b/gi) || []).map(v=>v.toLowerCase()))]
       .filter(v => !['pi','e','i','sin','cos','tan','log','abs','exp','ln','sqrt','min','max','std','sum','mean','mod'].includes(v));
 
     if (vars.length === 1) {
       const v = vars[0];
       steps.push({ n:2, t:`Isolating variable: ${v}` });
-
-      // First try real roots via bisection
-      const roots = findRoots(lhs, rhs, v, expr);
-
-      if (roots.length >= 1) {
-        result = roots.map((r,i) => roots.length > 1 ? `${v}${subscript(i+1)} = ${formatNum(r)}` : `${v} = ${formatNum(r)}`).join(',  ');
-        steps.push({ n:3, t:`${roots.length} real solution${roots.length>1?'s':''} found` });
+      const roots = findRoots(lhsE, rhsE, v, expr);
+      if (roots.length === 1) {
+        result = `${v} = ${formatNum(roots[0])}`;
+        steps.push({ n:3, t:`Solution: ${v} = ${formatNum(roots[0])}` });
+      } else if (roots.length > 1) {
+        result = roots.map((r,i)=>`${v}${subscript(i+1)} = ${formatNum(r)}`).join(',  ');
+        steps.push({ n:3, t:`${roots.length} solutions found` });
       } else {
-        // No real roots — try quadratic formula for ax^2 + bx + c = 0 form
-        const quadratic = solveQuadratic(lhs, rhs, v);
-        if (quadratic) {
-          result = quadratic.result;
-          steps.push({ n:3, t: quadratic.step });
+        // No real roots — try quadratic formula (handles complex roots too)
+        const quad = tryQuadratic(lhsE, rhsE, v);
+        if (quad) {
+          result = quad.result;
+          steps.push({ n:3, t: quad.step });
         } else {
-          // Try math.js symbolic solve as last resort
-          try {
-            const sym = math.evaluate(`solve(${lhs} - (${rhs}), ${v})`);
-            result = `${v} = ${formatNum(sym)}`;
-            steps.push({ n:3, t:'Solved symbolically' });
-          } catch {
-            result = 'No real solutions';
-            steps.push({ n:3, t:'Discriminant < 0 — only complex solutions exist' });
-          }
+          result = 'No real solutions';
+          steps.push({ n:3, t:'No real roots found in range [-100, 100]' });
         }
       }
     } else {
@@ -822,10 +775,7 @@ function solveExpression(raw) {
       steps.push({ n:2, t:'Evaluated right-hand side' });
     }
   } else {
-    // Pure expression — apply degree conversion here only
-    if (angleMode === 'deg') {
-      expr = expr.replace(/\b(sin|cos|tan)\(([^)]+)\)/g, (_, fn, arg) => `${fn}((${arg}) * pi / 180)`);
-    }
+    // Pure expression
     steps.push({ n:1, t:'Parsing expression' });
     let evalExpr = preprocessStats(expr);
     const val = math.evaluate(evalExpr);
@@ -838,109 +788,30 @@ function solveExpression(raw) {
   return { result, steps, unit };
 }
 
+// Quadratic formula — works for real and complex roots
+function tryQuadratic(lhs, rhs, v) {
+  try {
+    const f = (x) => { const s = {[v]:x}; return math.evaluate(lhs,s) - math.evaluate(rhs,s); };
+    const c = f(0), f1 = f(1), fm1 = f(-1);
+    const a = (f1 + fm1)/2 - c, b = (f1 - fm1)/2;
+    // Verify quadratic: f(2) must match
+    if (Math.abs(f(2) - (4*a + 2*b + c)) > 0.1 || Math.abs(a) < 1e-10) return null;
+    const disc = b*b - 4*a*c;
+    if (disc >= 0) {
+      const r1 = (-b + Math.sqrt(disc))/(2*a);
+      const r2 = (-b - Math.sqrt(disc))/(2*a);
+      if (Math.abs(r1-r2) < 0.001) return { result:`${v} = ${formatNum(r1)}`, step:'One repeated root' };
+      return { result:`${v}₁ = ${formatNum(r1)},  ${v}₂ = ${formatNum(r2)}`, step:'Two real roots via quadratic formula' };
+    } else {
+      const re = formatNum(-b/(2*a)), im = formatNum(Math.sqrt(-disc)/(2*a));
+      return { result:`${v}₁ = ${re} + ${im}i,  ${v}₂ = ${re} − ${im}i`, step:`Complex roots (discriminant = ${formatNum(disc)} < 0)` };
+    }
+  } catch { return null; }
+}
+
 function subscript(n) {
   const sub = ['₁','₂','₃','₄','₅'];
   return sub[n-1] || n;
-}
-
-// Symbolic integration (handles common cases)
-function symbolicIntegrate(exprStr, v) {
-  try {
-    const node = math.parse(exprStr);
-    return integrateNode(node, v);
-  } catch {
-    throw new Error('Could not integrate symbolically');
-  }
-}
-
-function integrateNode(node, v) {
-  const type = node.type;
-  // Constant
-  if (type === 'ConstantNode') return `${node.value}${v}`;
-  // Variable
-  if (type === 'SymbolNode') {
-    if (node.name === v) return `(${v}^2 / 2)`;
-    return `${node.name}*${v}`;
-  }
-  // Addition / Subtraction
-  if (type === 'OperatorNode' && (node.op === '+' || node.op === '-')) {
-    const left = integrateNode(node.args[0], v);
-    const right = integrateNode(node.args[1], v);
-    return `(${left} ${node.op} ${right})`;
-  }
-  // Power: x^n → x^(n+1)/(n+1)
-  if (type === 'OperatorNode' && node.op === '^') {
-    const base = node.args[0];
-    const exp = node.args[1];
-    if (base.type === 'SymbolNode' && base.name === v && exp.type === 'ConstantNode') {
-      const n = Number(exp.value);
-      if (n === -1) return `ln(|${v}|)`;
-      return `(${v}^${n + 1} / ${n + 1})`;
-    }
-  }
-  // Multiplication by constant: c*x^n
-  if (type === 'OperatorNode' && node.op === '*') {
-    const left = node.args[0];
-    const right = node.args[1];
-    if (left.type === 'ConstantNode') {
-      const inner = integrateNode(right, v);
-      return `${left.value} * ${inner}`;
-    }
-    if (right.type === 'ConstantNode') {
-      const inner = integrateNode(left, v);
-      return `${right.value} * ${inner}`;
-    }
-  }
-  // Common functions
-  if (type === 'FunctionNode') {
-    const arg = node.args[0];
-    const fn = node.name;
-    if (arg.type === 'SymbolNode' && arg.name === v) {
-      if (fn === 'sin') return `(-cos(${v}))`;
-      if (fn === 'cos') return `(sin(${v}))`;
-      if (fn === 'exp') return `(exp(${v}))`;
-      if (fn === 'ln' || fn === 'log') return `(${v}*ln(${v}) - ${v})`;
-    }
-  }
-  // Fallback: numerical representation
-  throw new Error('Expression too complex for symbolic integration');
-}
-
-// Quadratic formula solver — handles complex roots
-function solveQuadratic(lhs, rhs, v) {
-  try {
-    // Rearrange to f(x) = lhs - rhs, detect ax^2 + bx + c form
-    const f = (x) => {
-      const scope = { [v]: x };
-      return math.evaluate(lhs, scope) - math.evaluate(rhs, scope);
-    };
-    // Sample 3 points to extract a, b, c: f(0)=c, f(1)=a+b+c, f(-1)=a-b+c
-    const c = f(0);
-    const f1 = f(1);
-    const fm1 = f(-1);
-    const a = (f1 + fm1) / 2 - c;
-    const b = (f1 - fm1) / 2;
-    // Verify it's truly quadratic (f(2) should match a*4+b*2+c)
-    const check = Math.abs(f(2) - (4*a + 2*b + c));
-    if (check > 0.01 || Math.abs(a) < 1e-10) return null;
-    const disc = b*b - 4*a*c;
-    if (disc >= 0) {
-      const r1 = (-b + Math.sqrt(disc)) / (2*a);
-      const r2 = (-b - Math.sqrt(disc)) / (2*a);
-      if (Math.abs(r1 - r2) < 0.001) {
-        return { result: `${v} = ${formatNum(r1)}`, step: `One repeated root (discriminant = 0)` };
-      }
-      return { result: `${v}₁ = ${formatNum(r1)},  ${v}₂ = ${formatNum(r2)}`, step: `Two real roots via quadratic formula` };
-    } else {
-      // Complex roots
-      const realPart = formatNum(-b / (2*a));
-      const imagPart = formatNum(Math.sqrt(-disc) / (2*a));
-      return {
-        result: `${v}₁ = ${realPart} + ${imagPart}i,  ${v}₂ = ${realPart} − ${imagPart}i`,
-        step: `Complex roots (discriminant = ${formatNum(disc)} < 0)`
-      };
-    }
-  } catch { return null; }
 }
 
 // Multi-root finder: tries bisection across multiple intervals
@@ -952,20 +823,24 @@ function findRoots(lhs, rhs, v, fullExpr) {
       return math.evaluate(lhs, scope) - math.evaluate(rhs, scope);
     };
 
-    // Use larger step size to avoid finding duplicate roots
+    // Scan for sign changes in a reasonable range
+    const ranges = [];
     const pts = [];
-    for (let x = -100; x <= 100; x += 2) pts.push(x);
+    for (let x = -200; x <= 200; x += 0.5) pts.push(x);
     for (let i = 0; i < pts.length - 1; i++) {
       try {
         const fa = f(pts[i]), fb = f(pts[i+1]);
-        if (isFinite(fa) && isFinite(fb) && fa * fb < 0) {
-          const root = bisect(f, pts[i], pts[i+1]);
-          // Deduplicate with tolerance of 0.1
-          if (root !== null && !roots.some(r => Math.abs(r - root) < 0.1)) {
-            roots.push(Math.round(root * 1e9) / 1e9);
-          }
+        if (isFinite(fa) && isFinite(fb) && fa * fb <= 0) {
+          ranges.push([pts[i], pts[i+1]]);
         }
       } catch {}
+    }
+
+    for (const [lo, hi] of ranges) {
+      const root = bisect(f, lo, hi);
+      if (root !== null && !roots.some(r => Math.abs(r - root) < 0.001)) {
+        roots.push(root);
+      }
     }
   } catch {}
   return roots;
@@ -992,8 +867,8 @@ function preprocessStats(expr) {
 function addContextSteps(expr, steps, val) {
   if (/\b(sin|cos|tan)\b/.test(expr)) {
     steps.push({ n:3, t: angleMode === 'deg' ? 'Trig evaluated in degree mode' : 'Trig evaluated in radian mode' });
-  } else if (/\blog\b/.test(expr) && !/\bln\b/.test(expr)) {
-    steps.push({ n:3, t:'log() computes base-10 logarithm' });
+  } else if (/\blog10\b/.test(expr) || /\blog\b/.test(expr)) {
+    steps.push({ n:3, t:'log() uses base 10. Use ln() for natural log.' });
   } else if (/factorial/.test(expr)) {
     steps.push({ n:3, t:'n! = product of all integers from 1 to n' });
   } else if (/sqrt/.test(expr)) {
@@ -1155,17 +1030,28 @@ async function solveWithAI(imageBase64, source) {
   if (activeBtn) { activeBtn.style.opacity = '0.6'; activeBtn.style.pointerEvents = 'none'; }
 
   try {
-    const prompt = `You are a STEM homework solver specialising in ${currentSubject}. The user has provided an image of a ${source}.
+    const prompt = `You are a STEM homework solver specialising in ${currentSubject}.
 
-Extract the equation or problem from the image, solve it step by step, and return ONLY a raw JSON object with no markdown formatting, no code blocks, no backticks, no extra text before or after. Just the JSON.
+The user has provided an image of a ${source}. 
 
-{"extracted":"the equation as text","steps":["step 1","step 2","step 3"],"result":"final answer","unit":"unit or empty string","explanation":"one sentence summary"}`;
+1. Extract the exact equation or problem from the image.
+2. Solve it step-by-step.
+3. Give the final answer clearly.
 
-    const response = await fetch('/api/proxy', {
+Respond in this exact JSON format (no markdown, no backticks):
+{
+  "extracted": "<the equation/problem as text>",
+  "steps": ["step 1 description", "step 2 description", "step 3 description"],
+  "result": "<final answer as a number or expression>",
+  "unit": "<unit if applicable, else empty string>",
+  "explanation": "<one sentence summary>"
+}`;
+
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        model: 'claude-3-5-sonnet-20241022',
+        model: 'claude-sonnet-4-20250514',
         max_tokens: 1000,
         messages: [{
           role: 'user',
@@ -1178,23 +1064,15 @@ Extract the equation or problem from the image, solve it step by step, and retur
     });
 
     const data = await response.json();
-    // Surface API errors clearly
-    if (data.error) throw new Error(data.error.message || JSON.stringify(data.error));
     const text = data.content?.find(b => b.type === 'text')?.text || '';
 
     let parsed;
     try {
-      // Try multiple strategies to extract JSON
-      let clean = text.trim();
-      // Remove markdown code blocks
-      clean = clean.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
-      // Extract JSON object if surrounded by other text
-      const jsonMatch = clean.match(/\{[\s\S]*\}/);
-      if (jsonMatch) clean = jsonMatch[0];
+      const clean = text.replace(/```json|```/g, '').trim();
       parsed = JSON.parse(clean);
     } catch {
-      // Last resort: build a response from the raw text
-      parsed = { extracted: text.slice(0, 100) || 'Could not read image', steps: [], result: text.slice(0, 200) || '—', unit: '', explanation: 'AI could not parse the image. Try drawing more clearly or using Snap mode.' };
+      // fallback: show raw text
+      parsed = { extracted: 'Could not parse', steps: [], result: text.slice(0, 200), unit: '', explanation: '' };
     }
 
     // Populate eq-display with extracted equation
@@ -1270,6 +1148,9 @@ function renderHistory() {
           t.classList.toggle('active', t.dataset.subject === currentSubject);
         });
       }
+      document.querySelectorAll('.subject-tab').forEach(t => {
+        t.classList.toggle('active', t.dataset.subject === currentSubject);
+      });
       setMode('keyboard');
       setTimeout(() => {
         const el2 = getEqEl();
