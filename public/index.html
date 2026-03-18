@@ -728,21 +728,36 @@ function solveExpression(raw) {
     steps.push({ n:1, t:`Equation: ${lhs} = ${rhs}` });
 
     // Find single unknown letter (avoid known constants pi, e, i)
-    const vars = [...new Set((raw.match(/\b([a-df-wyz])\b/gi) || []).map(v=>v.toLowerCase()))]
-      .filter(v => !['pi','sin','cos','tan','log','abs','exp','ln','sqrt','min','max','std'].includes(v));
+    const vars = [...new Set((raw.match(/\b([a-z])\b/gi) || []).map(v=>v.toLowerCase()))]
+      .filter(v => !['pi','e','i','sin','cos','tan','log','abs','exp','ln','sqrt','min','max','std','sum','mean','mod'].includes(v));
 
     if (vars.length === 1) {
       const v = vars[0];
       steps.push({ n:2, t:`Isolating variable: ${v}` });
+
+      // First try real roots via bisection
       const roots = findRoots(lhs, rhs, v, expr);
-      if (roots.length === 1) {
-        result = `${v} = ${formatNum(roots[0])}`;
-        steps.push({ n:3, t:`Solution: ${v} = ${formatNum(roots[0])}` });
-      } else if (roots.length > 1) {
-        result = roots.map((r,i)=>`${v}${subscript(i+1)} = ${formatNum(r)}`).join(',  ');
-        steps.push({ n:3, t:`${roots.length} solutions found` });
+
+      if (roots.length >= 1) {
+        result = roots.map((r,i) => roots.length > 1 ? `${v}${subscript(i+1)} = ${formatNum(r)}` : `${v} = ${formatNum(r)}`).join(',  ');
+        steps.push({ n:3, t:`${roots.length} real solution${roots.length>1?'s':''} found` });
       } else {
-        result = formatNum(math.evaluate(rhs));
+        // No real roots — try quadratic formula for ax^2 + bx + c = 0 form
+        const quadratic = solveQuadratic(lhs, rhs, v);
+        if (quadratic) {
+          result = quadratic.result;
+          steps.push({ n:3, t: quadratic.step });
+        } else {
+          // Try math.js symbolic solve as last resort
+          try {
+            const sym = math.evaluate(`solve(${lhs} - (${rhs}), ${v})`);
+            result = `${v} = ${formatNum(sym)}`;
+            steps.push({ n:3, t:'Solved symbolically' });
+          } catch {
+            result = 'No real solutions';
+            steps.push({ n:3, t:'Discriminant < 0 — only complex solutions exist' });
+          }
+        }
       }
     } else {
       // just evaluate rhs
@@ -766,6 +781,43 @@ function solveExpression(raw) {
 function subscript(n) {
   const sub = ['₁','₂','₃','₄','₅'];
   return sub[n-1] || n;
+}
+
+// Quadratic formula solver — handles complex roots
+function solveQuadratic(lhs, rhs, v) {
+  try {
+    // Rearrange to f(x) = lhs - rhs, detect ax^2 + bx + c form
+    const f = (x) => {
+      const scope = { [v]: x };
+      return math.evaluate(lhs, scope) - math.evaluate(rhs, scope);
+    };
+    // Sample 3 points to extract a, b, c: f(0)=c, f(1)=a+b+c, f(-1)=a-b+c
+    const c = f(0);
+    const f1 = f(1);
+    const fm1 = f(-1);
+    const a = (f1 + fm1) / 2 - c;
+    const b = (f1 - fm1) / 2;
+    // Verify it's truly quadratic (f(2) should match a*4+b*2+c)
+    const check = Math.abs(f(2) - (4*a + 2*b + c));
+    if (check > 0.01 || Math.abs(a) < 1e-10) return null;
+    const disc = b*b - 4*a*c;
+    if (disc >= 0) {
+      const r1 = (-b + Math.sqrt(disc)) / (2*a);
+      const r2 = (-b - Math.sqrt(disc)) / (2*a);
+      if (Math.abs(r1 - r2) < 0.001) {
+        return { result: `${v} = ${formatNum(r1)}`, step: `One repeated root (discriminant = 0)` };
+      }
+      return { result: `${v}₁ = ${formatNum(r1)},  ${v}₂ = ${formatNum(r2)}`, step: `Two real roots via quadratic formula` };
+    } else {
+      // Complex roots
+      const realPart = formatNum(-b / (2*a));
+      const imagPart = formatNum(Math.sqrt(-disc) / (2*a));
+      return {
+        result: `${v}₁ = ${realPart} + ${imagPart}i,  ${v}₂ = ${realPart} − ${imagPart}i`,
+        step: `Complex roots (discriminant = ${formatNum(disc)} < 0)`
+      };
+    }
+  } catch { return null; }
 }
 
 // Multi-root finder: tries bisection across multiple intervals
